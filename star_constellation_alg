@@ -7,16 +7,17 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import torch
 from tqdm import tqdm
+import shutil
 
 # Configuration
 DATASET_PATH = "stars_constellations_dataset"  # Path to dataset
 IMG_SIZE = 640  # Target image size
 BATCH_SIZE = 16
-EPOCHS = 1
+EPOCHS = 10
 LEARNING_RATE = 0.0005
 MODEL_TYPE = "yolov8s.pt"  # Using the small variant (11.2M parameters)
 
-# Define constellation classes (16 classes as per requirements)
+# Define constellation classes (16 classes)
 CLASSES = [
     "Aquila", "Bootes", "Canis Major", "Canis Minor", "Cassiopeia",
     "Cygnus", "Gemini", "Leo", "Lyra", "Moon", 
@@ -36,89 +37,143 @@ def create_dataset_structure():
     
     return
 
-def preprocess_images(input_dir, output_dir, augment=True):
+def create_yolov8_structure():
+    # Create a new dataset directory for preprocessed data
+    processed_dir = f"{DATASET_PATH}_processed"
+    
+    # Create proper YOLOv8 structure
+    os.makedirs(f"{processed_dir}/images/train", exist_ok=True)
+    os.makedirs(f"{processed_dir}/images/val", exist_ok=True)
+    os.makedirs(f"{processed_dir}/images/test", exist_ok=True)
+    os.makedirs(f"{processed_dir}/labels/train", exist_ok=True)
+    os.makedirs(f"{processed_dir}/labels/val", exist_ok=True)
+    os.makedirs(f"{processed_dir}/labels/test", exist_ok=True)
+    
+    return processed_dir
+
+def preprocess_dataset(train_only=False):
     """
-    Enhanced image preprocessing function with advanced techniques for constellation detection
-    
-    Parameters:
-    -----------
-    input_dir : str
-        Directory containing input images
-    output_dir : str
-        Directory to save processed images
-    augment : bool
-        Whether to apply data augmentation (default: True)
+    Preprocess both images and labels, ensuring both are properly copied and aligned
     """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    # Define directory paths
+    raw_images_dir = f"{DATASET_PATH}/images"
+    raw_labels_dir = f"{DATASET_PATH}/labels"
+    proc_images_dir = f"{DATASET_PATH}/preprocessed_images"
+    proc_labels_dir = f"{DATASET_PATH}/preprocessed_labels"
     
-    # Get all image files
-    image_files = [f for f in os.listdir(input_dir) if f.endswith(('.jpg', '.png', '.jpeg', '.tif', '.tiff'))]
+    # Create directories
+    os.makedirs(f"{proc_images_dir}/train", exist_ok=True)
+    os.makedirs(f"{proc_labels_dir}/train", exist_ok=True)
     
-    for img_file in tqdm(image_files, desc="Preprocessing images"):
-        img_path = os.path.join(input_dir, img_file)
+    if not train_only:
+        os.makedirs(f"{proc_images_dir}/val", exist_ok=True)
+        os.makedirs(f"{proc_labels_dir}/val", exist_ok=True)
+        os.makedirs(f"{proc_images_dir}/test", exist_ok=True)
+        os.makedirs(f"{proc_labels_dir}/test", exist_ok=True)
+    
+    # Process training set
+    print("Processing training images and labels...")
+    process_subset(
+        f"{raw_images_dir}/train", 
+        f"{raw_labels_dir}/train",
+        f"{proc_images_dir}/train", 
+        f"{proc_labels_dir}/train", 
+        augment=True
+    )
+    
+    if not train_only:
+        # Process validation set
+        print("Processing validation images and labels...")
+        process_subset(
+            f"{raw_images_dir}/val", 
+            f"{raw_labels_dir}/val",
+            f"{proc_images_dir}/val", 
+            f"{proc_labels_dir}/val", 
+            augment=False
+        )
         
-        # Read image and handle errors
+        # Process test set
+        print("Processing test images and labels...")
+        process_subset(
+            f"{raw_images_dir}/test", 
+            f"{raw_labels_dir}/test",
+            f"{proc_images_dir}/test", 
+            f"{proc_labels_dir}/test", 
+            augment=False
+        )
+    
+    return proc_images_dir, proc_labels_dir
+
+def process_subset(img_input_dir, label_input_dir, img_output_dir, label_output_dir, augment=False):
+    """
+    Process a subset of the dataset, handling both images and labels
+    """
+    # Get all image files
+    image_files = [f for f in os.listdir(img_input_dir) if f.endswith(('.jpg', '.png', '.jpeg', '.tif', '.tiff'))]
+    
+    for img_file in tqdm(image_files, desc="Processing"):
+        # Get image base name without extension
+        img_base = os.path.splitext(img_file)[0]
+        img_path = os.path.join(img_input_dir, img_file)
+        label_file = f"{img_base}.txt"
+        label_path = os.path.join(label_input_dir, label_file)
+        
+        # Skip if label doesn't exist
+        if not os.path.exists(label_path):
+            print(f"Warning: No label file found for {img_file}, skipping")
+            continue
+        
+        # Read and preprocess image
         img = cv2.imread(img_path)
         if img is None:
             print(f"Failed to load image: {img_path}")
             continue
         
-        # Convert to RGB (YOLOv8 works with RGB)
+        # Basic preprocessing
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Noise reduction (adaptive to preserve star details)
-        # Use Non-local Means Denoising which preserves edges and fine details
-        img = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
-        
-        # Contrast Limited Adaptive Histogram Equalization (CLAHE)
-        # This enhances contrast while preventing noise amplification
-        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
+        l, a, b = cv2.split(cv2.cvtColor(img, cv2.COLOR_RGB2LAB))
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         l = clahe.apply(l)
-        lab = cv2.merge((l, a, b))
-        img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-        
-        # Resize to square 640x640 with proper interpolation
+        img = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2RGB)
         img_resized = cv2.resize(img, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
         
-        # Save the preprocessed image (RGB to BGR for OpenCV saving)
-        output_path = os.path.join(output_dir, img_file)
-        cv2.imwrite(output_path, cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR))
+        # Save preprocessed image
+        img_output_path = os.path.join(img_output_dir, img_file)
+        cv2.imwrite(img_output_path, cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR))
         
-        # Perform data augmentation if enabled
+        # Copy label file (no transformation needed for basic resize)
+        label_output_path = os.path.join(label_output_dir, label_file)
+        shutil.copy(label_path, label_output_path)
+        
+        # Simple augmentation
         if augment:
-            # Create augmented versions with varying brightness/contrast
-            # This is especially important for astronomical imagery
+            # Rotation 90 degrees
+            height, width = img_resized.shape[:2]
+            matrix = cv2.getRotationMatrix2D((width/2, height/2), 90, 1)
+            rotated = cv2.warpAffine(img_resized, matrix, (width, height))
+            rot_img_path = os.path.join(img_output_dir, f"rot_90_{img_file}")
+            cv2.imwrite(rot_img_path, cv2.cvtColor(rotated, cv2.COLOR_RGB2BGR))
             
-            # 1. Brightness variation (simulates different exposure times)
-            for brightness in [0.8, 1.2]:
-                bright_img = np.clip(img_resized * brightness, 0, 255).astype(np.uint8)
-                bright_path = os.path.join(output_dir, f"bright_{brightness}_{img_file}")
-                cv2.imwrite(bright_path, cv2.cvtColor(bright_img, cv2.COLOR_RGB2BGR))
-                
-            # 2. Rotation (simulates camera rotation in night sky photography)
-            for angle in [90, 180, 270]:
-                height, width = img_resized.shape[:2]
-                matrix = cv2.getRotationMatrix2D((width/2, height/2), angle, 1)
-                rotated = cv2.warpAffine(img_resized, matrix, (width, height))
-                rot_path = os.path.join(output_dir, f"rot_{angle}_{img_file}")
-                cv2.imwrite(rot_path, cv2.cvtColor(rotated, cv2.COLOR_RGB2BGR))
-                
-            # 3. Add simulated noise (realistic for astronomical imagery)
-            noise_img = img_resized.copy()
-            noise = np.random.normal(0, 5, noise_img.shape).astype(np.uint8)
-            noise_img = np.clip(noise_img + noise, 0, 255).astype(np.uint8)
-            noise_path = os.path.join(output_dir, f"noise_{img_file}")
-            cv2.imwrite(noise_path, cv2.cvtColor(noise_img, cv2.COLOR_RGB2BGR))
-            
-            # 4. Vertical flip (valid astronomical transformation)
-            flipped = cv2.flip(img_resized, 0)
-            flip_path = os.path.join(output_dir, f"flip_{img_file}")
-            cv2.imwrite(flip_path, cv2.cvtColor(flipped, cv2.COLOR_RGB2BGR))
-            
+            # Transform labels for rotation (this is the tricky part)
+            rot_label_path = os.path.join(label_output_dir, f"rot_90_{img_base}.txt")
+            with open(label_path, 'r') as f_in, open(rot_label_path, 'w') as f_out:
+                for line in f_in:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:  # class x y width height
+                        cls = parts[0]
+                        x, y = float(parts[1]), float(parts[2])
+                        w, h = float(parts[3]), float(parts[4])
+                        
+                        # For 90 degree rotation: (x,y) -> (1-y,x)
+                        new_x = 1.0 - y
+                        new_y = x
+                        # Swap width and height
+                        new_w, new_h = h, w
+                        
+                        f_out.write(f"{cls} {new_x:.6f} {new_y:.6f} {new_w:.6f} {new_h:.6f}\n")
+    
     return
+    
 
 def split_dataset(image_list, labels_list, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1):
     """
@@ -137,23 +192,19 @@ def split_dataset(image_list, labels_list, train_ratio=0.7, val_ratio=0.2, test_
     
     return (train_images, train_labels), (val_images, val_labels), (test_images, test_labels)
 
-def create_yaml_config():
-    """
-    Create YAML configuration file for YOLOv8 training
-    """
+def create_yaml_config(dataset_path):
     config = {
-        'path': os.path.abspath(DATASET_PATH),
+        'path': os.path.abspath(dataset_path),
         'train': 'images/train',
         'val': 'images/val',
         'test': 'images/test',
         'names': {i: name for i, name in enumerate(CLASSES)}
     }
     
-    with open(f"{DATASET_PATH}/constellation_data.yaml", 'w') as f:
+    with open(f"{dataset_path}/constellation_data.yaml", 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
     
-    print(f"Created YAML configuration at {DATASET_PATH}/constellation_data.yaml")
-    return f"{DATASET_PATH}/constellation_data.yaml"
+    return f"{dataset_path}/constellation_data.yaml"
 
 def train_model(yaml_path):
     """
@@ -240,93 +291,66 @@ def detect_constellations(model, image_path):
     return result
 
 def main():
-    """
-    Main function to run the constellation detection pipeline with preprocessing
-    """
-    # Step 1: Preprocess images
-    print("Preprocessing and augmenting images...")
+    # Create new dataset structure with proper YOLOv8 format
+    processed_dir = create_yolov8_structure()
     
-    # Define raw and processed directories based on existing structure
-    raw_images_dir = "stars_constellations_dataset/images"  # Base directory containing your images
-    processed_images_dir = "stars_constellations_dataset/preprocessed_images"  # New directory for processed images
+    # Preprocess and copy data from original dataset to new structure
+    print("Preprocessing dataset...")
     
-    # Create preprocessed images directory structure
-    os.makedirs(f"{processed_images_dir}/train", exist_ok=True)
-    os.makedirs(f"{processed_images_dir}/val", exist_ok=True)
-    os.makedirs(f"{processed_images_dir}/test", exist_ok=True)
-    
-    # Preprocess and augment training images
-    print("Processing training images...")
-    preprocess_images(
-        input_dir=f"{raw_images_dir}/train", 
-        output_dir=f"{processed_images_dir}/train",
+    # Process training set - copy from original to new structure
+    process_subset(
+        f"{DATASET_PATH}/images/train", 
+        f"{DATASET_PATH}/labels/train",
+        f"{processed_dir}/images/train", 
+        f"{processed_dir}/labels/train", 
         augment=True
     )
     
-    # Preprocess validation images (no augmentation)
-    print("Processing validation images...")
-    preprocess_images(
-        input_dir=f"{raw_images_dir}/val", 
-        output_dir=f"{processed_images_dir}/val",
+    # Process validation set
+    process_subset(
+        f"{DATASET_PATH}/images/val", 
+        f"{DATASET_PATH}/labels/val",
+        f"{processed_dir}/images/val", 
+        f"{processed_dir}/labels/val", 
         augment=False
     )
     
-    # Preprocess test images (no augmentation)
-    print("Processing test images...")
-    preprocess_images(
-        input_dir=f"{raw_images_dir}/test", 
-        output_dir=f"{processed_images_dir}/test",
+    # Process test set
+    process_subset(
+        f"{DATASET_PATH}/images/test", 
+        f"{DATASET_PATH}/labels/test",
+        f"{processed_dir}/images/test", 
+        f"{processed_dir}/labels/test", 
         augment=False
     )
     
-    # Step 2: Update or create YAML configuration for the preprocessed images
-    yaml_path = f"{DATASET_PATH}/constellation_data.yaml"
+    # Create YAML config for the new structure
+    yaml_path = create_yaml_config(processed_dir)
     
-    # Check if the YAML file already exists
-    if os.path.exists(yaml_path):
-        print(f"YAML configuration found at {yaml_path}, updating...")
-        with open(yaml_path, 'r') as f:
-            config = yaml.safe_load(f)
-    else:
-        print(f"Creating new YAML configuration at {yaml_path}...")
-        config = {
-            'path': os.path.abspath(DATASET_PATH),
-            'names': {i: name for i, name in enumerate(CLASSES)}
-        }
-    
-    # Update paths to use preprocessed images
-    config['train'] = 'preprocessed_images/train'
-    config['val'] = 'preprocessed_images/val' 
-    config['test'] = 'preprocessed_images/test'
-    
-    # Save updated config
-    with open(yaml_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-    
-    print(f"Updated YAML configuration at {yaml_path}")
-    
-    # Step 3: Train the model
+    # Train using the properly structured preprocessed dataset
     print("Training YOLOv8s model...")
-    model, training_results = train_model(yaml_path)
+    model = YOLO(MODEL_TYPE)
     
-    # Step 4: Evaluate the model
+    results = model.train(
+        data=yaml_path,
+        epochs=EPOCHS,
+        batch=BATCH_SIZE,
+        imgsz=IMG_SIZE,
+        optimizer="Adam",  
+        lr0=LEARNING_RATE,
+        name="constellation_detector_processed"
+    )
+    
+    # Evaluate and save the model
     print("Evaluating model performance...")
     metrics = evaluate_model(model)
     
-    # Save the trained model
-    model_save_path = "models/constellation_detector_yolov8s.pt"
+    model_save_path = "models/constellation_detector_processed_yolov8s.pt"
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
     model.save(model_save_path)
     print(f"Model saved to {model_save_path}")
     
-    # Step 5: Optional - Test with a sample image
-    test_images = os.listdir(f"{raw_images_dir}/test")
-    if test_images:
-        sample_image = os.path.join(f"{raw_images_dir}/test", test_images[0])
-        print(f"Running inference on sample image: {sample_image}")
-        detect_constellations(model, sample_image)
-    
-    print("Constellation detection model training and evaluation complete!")
+    print("Processed constellation detection model training and evaluation complete!")
 
 if __name__ == "__main__":
     main()
